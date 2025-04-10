@@ -1,0 +1,313 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+var (
+	homeDir    = os.Getenv("HOME")
+	contentDir = homeDir + "/myblog/content" // Base dir for posts
+	staticDir  = homeDir + "/myblog/upload"  // Dir for uploaded images
+)
+
+const (
+	socketPath   = "/wwwFS.out/socket.blog_editor.sock"
+	postsPerPage = 30
+)
+
+var languages []string
+
+func main() {
+	debug := flag.Bool("d", false, "Enable debug logging (also --debug)")
+	flag.Parse()
+
+	// Scan language directories once
+	baseDir := filepath.Join(homeDir, "myblog", "content")
+	dirs, err := os.ReadDir(baseDir)
+	if err == nil {
+		for _, dir := range dirs {
+			name := dir.Name()
+			if dir.IsDir() && len(name) == 2 && isAlpha(name) {
+				if name == "en" {
+					languages = append([]string{"en"}, languages...) // Prepend "en"
+				} else {
+					languages = append(languages, name)
+				}
+			}
+		}
+	}
+	if len(languages) == 0 {
+		languages = []string{"en"} // Default fallback
+	}
+
+	// Print default paths and languages
+	log.Println("Starting blog_editor...")
+	log.Printf("Content Directory: %s", contentDir)
+	log.Printf("Static Directory: %s", staticDir)
+	log.Printf("Socket Path: %s", socketPath)
+	log.Printf("Posts Per Page: %d", postsPerPage)
+	log.Printf("Languages: %v", languages)
+	log.Printf("Debug Mode: %v", *debug)
+
+	// Ensure directories exist
+	os.MkdirAll(contentDir, 0755)
+	os.MkdirAll(staticDir, 0755)
+
+	// Remove old socket if exists
+	os.Remove(socketPath)
+
+	// Set up HTTP server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/save", makeHandler(saveHandler, *debug))
+	mux.HandleFunc("/upload", makeHandler(uploadHandler, *debug))
+	mux.HandleFunc("/list", makeHandler(listHandler, *debug))
+	mux.HandleFunc("/posts/", makeHandler(postsHandler, *debug))
+	mux.HandleFunc("/readOption", makeHandler(readOptionHandler, *debug))
+	mux.HandleFunc("/", makeHandler(unknownHandler, *debug))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		log.Fatalf("Failed to listen on socket: %v", err)
+	}
+	if err := os.Chmod(socketPath, 0666); err != nil {
+		log.Fatalf("Failed to set socket permissions: %v", err)
+	}
+	defer listener.Close()
+
+	log.Println("Server running on socket:", socketPath)
+	if err := server.Serve(listener); err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
+}
+
+func makeHandler(fn func(http.ResponseWriter, *http.Request, bool), debug bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if debug {
+			log.Printf("Request: %s %s", r.Method, r.URL.Path)
+			if r.Method == http.MethodPost {
+				r.ParseForm()
+				log.Printf("Form Data: %v", r.Form)
+			}
+		}
+		fn(w, r, debug)
+	}
+}
+
+func saveHandler(w http.ResponseWriter, r *http.Request, debug bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	path := r.FormValue("path")
+	content := r.FormValue("content")
+	lang := r.FormValue("lang")
+	now := time.Now()
+	yearMonth := now.Format("2006/01")
+
+	if !isValidLang(lang) {
+		lang = languages[0] // Default to first language
+	}
+
+	if path == "" { // New post
+		filename := now.Format("20060102_150405") + ".md"
+		path = filepath.Join(lang, yearMonth, filename)
+	} else { // Existing post
+		if !strings.HasPrefix(path, yearMonth) || strings.Contains(path, "..") || strings.Contains(path, "/") {
+			http.Error(w, "Invalid path", http.StatusBadRequest)
+			return
+		}
+		path = filepath.Join(lang, yearMonth, path)
+	}
+
+	fullPath := filepath.Join(contentDir, path)
+	os.MkdirAll(filepath.Dir(fullPath), 0755)
+	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+		http.Error(w, "Failed to save file", http.StatusInternalServerError)
+		return
+	}
+
+	if debug {
+		log.Printf("Saved file: %s, size: %d bytes", fullPath, len(content))
+	}
+	fmt.Fprintf(w, "Saved: %s", path)
+}
+
+func uploadHandler(w http.ResponseWriter, r *http.Request, debug bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		http.Error(w, "Failed to get image", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	hash := sha256.Sum256([]byte(header.Filename + time.Now().String()))
+	hashStr := hex.EncodeToString(hash[:])[:10]
+	ext := filepath.Ext(header.Filename)
+	filename := hashStr + ext
+	fullPath := filepath.Join(staticDir, filename)
+
+	out, err := os.Create(fullPath)
+	if err != nil {
+		http.Error(w, "Failed to save image", http.StatusInternalServerError)
+		return
+	}
+	defer out.Close()
+
+	written, err := io.Copy(out, file)
+	if err != nil {
+		http.Error(w, "Failed to write image", http.StatusInternalServerError)
+		return
+	}
+
+	if debug {
+		log.Printf("Uploaded image: %s, size: %d bytes", fullPath, written)
+	}
+
+	response := map[string]string{
+		"hash":     filename,
+		"original": header.Filename,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func listHandler(w http.ResponseWriter, r *http.Request, debug bool) {
+	lang := r.URL.Query().Get("lang")
+	if !isValidLang(lang) {
+		lang = languages[0]
+	}
+	yearMonth := time.Now().Format("2006/01")
+	dir := filepath.Join(contentDir, lang, yearMonth)
+
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	perPage := postsPerPage
+
+	files, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		http.Error(w, "Failed to read directory", http.StatusInternalServerError)
+		return
+	}
+
+	var posts []string
+	for _, file := range files {
+		if !file.IsDir() && strings.HasSuffix(file.Name(), ".md") {
+			posts = append(posts, file.Name())
+		}
+	}
+
+	total := len(posts)
+	start := (page - 1) * perPage
+	end := start + perPage
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+
+	if debug {
+		log.Printf("Listing posts: %d total, page %d, showing %d-%d, lang: %s", total, page, start+1, end, lang)
+	}
+
+	response := map[string]interface{}{
+		"posts": posts[start:end],
+		"total": total,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func postsHandler(w http.ResponseWriter, r *http.Request, debug bool) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	name := strings.TrimPrefix(r.URL.Path, "/posts/")
+	yearMonth := time.Now().Format("2006/01")
+	if !strings.HasPrefix(name, yearMonth) || strings.Contains(name, "..") {
+		http.Error(w, "Invalid post name", http.StatusBadRequest)
+		return
+	}
+
+	lang := languages[0] // Default fallback
+	fullPath := filepath.Join(contentDir, lang, yearMonth, name)
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		http.Error(w, "Failed to read post", http.StatusNotFound)
+		return
+	}
+
+	if debug {
+		log.Printf("Served post: %s, size: %d bytes", fullPath, len(content))
+	}
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write(content)
+}
+
+func readOptionHandler(w http.ResponseWriter, r *http.Request, debug bool) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if debug {
+		log.Printf("Serving language options: %v", languages)
+	}
+
+	response := map[string][]string{
+		"lang": languages,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func unknownHandler(w http.ResponseWriter, r *http.Request, debug bool) {
+	if debug {
+		body, _ := io.ReadAll(r.Body)
+		log.Printf("Unknown path: %s, method: %s, body size: %d bytes", r.URL.Path, r.Method, len(body))
+	}
+	http.Error(w, "Not found", http.StatusNotFound)
+}
+
+func isValidLang(lang string) bool {
+	for _, l := range languages {
+		if l == lang {
+			return true
+		}
+	}
+	return false
+}
+
+func isAlpha(s string) bool {
+	for _, r := range s {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+			return false
+		}
+	}
+	return true
+}

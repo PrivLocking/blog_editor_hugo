@@ -1,0 +1,134 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/user"
+	"sync"
+	"time"
+)
+
+func main() {
+	debug := flag.Bool("d", false, "Enable debug logging")
+	period := flag.Int("t", 300, "Debounce period in seconds (min 180)")
+	maxRetries := flag.Int("max-retry", 1, "Max retries on failure")
+	retryPeriod := flag.Int("retry-period", 3600, "Seconds to reset retry count")
+	flag.Parse()
+
+	if u, _ := user.Current(); u != nil && u.Uid == "0" {
+		fmt.Println("Error: don't allow 'root' to run")
+		os.Exit(1)
+	}
+
+	if *period < 180 {
+		*period = 180
+		log.Printf("Period adjusted to minimum: %ds", *period)
+	}
+
+	var (
+		lastUpdateTime  = time.Now()
+		nextRunTime     time.Time
+		retryCount      int
+		lastFailureTime time.Time
+		timer           *time.Timer
+		mu              sync.Mutex
+	)
+
+	log.Printf("Listening on unix:/wwwFS.out/unix.hugo_update_daemon.sock and 0.0.0.0:45718, period: %ds", *period)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		r.Body.Close()
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		now := time.Now()
+		if debug != nil && *debug {
+			log.Printf("last_update_time: %s, next_run_time: %s, retry_count: %d", lastUpdateTime, nextRunTime, retryCount)
+		}
+
+		if now.Sub(lastUpdateTime) > time.Duration(*period)*time.Second {
+			if timer != nil {
+				timer.Stop()
+				timer = nil
+			}
+			runHugo(&lastUpdateTime, &nextRunTime, &retryCount, &lastFailureTime, *period, *maxRetries, *debug)
+		} else if nextRunTime.IsZero() {
+			nextRunTime = lastUpdateTime.Add(time.Duration(*period) * time.Second)
+			timer = time.AfterFunc(time.Until(nextRunTime), func() {
+				mu.Lock()
+				defer mu.Unlock()
+				runHugo(&lastUpdateTime, &nextRunTime, &retryCount, &lastFailureTime, *period, *maxRetries, *debug)
+			})
+			if *debug {
+				log.Printf("Scheduled next run at: %s", nextRunTime)
+			}
+		}
+
+		if !lastFailureTime.IsZero() && now.Sub(lastFailureTime) > time.Duration(*retryPeriod)*time.Second {
+			retryCount = 0
+			lastFailureTime = time.Time{}
+			if *debug {
+				log.Printf("Retry count reset after %ds", *retryPeriod)
+			}
+		}
+	})
+
+	go func() {
+		os.Remove("/wwwFS.out/unix.hugo_update_daemon.sock")
+		unixListener, err := net.Listen("unix", "/wwwFS.out/unix.hugo_update_daemon.sock")
+		if err != nil {
+			log.Fatalf("Failed to listen on Unix socket: %v", err)
+		}
+		defer unixListener.Close()
+		if err := os.Chmod("/wwwFS.out/unix.hugo_update_daemon.sock", 0666); err != nil {
+			log.Fatalf("Failed to set socket permissions: %v", err)
+		}
+		http.Serve(unixListener, mux)
+	}()
+
+	tcpListener, err := net.Listen("tcp", "0.0.0.0:45718")
+	if err != nil {
+		log.Fatalf("Failed to listen on TCP: %v", err)
+	}
+	defer tcpListener.Close()
+	http.Serve(tcpListener, mux)
+}
+
+func runHugo(lastUpdateTime, nextRunTime *time.Time, retryCount *int, lastFailureTime *time.Time, period, maxRetries int, debug bool) {
+	cmd := exec.Command("hugo", "--minify")
+	err := cmd.Run()
+	now := time.Now()
+
+	if err != nil {
+		if debug {
+			log.Printf("Hugo failed: %v", err)
+		}
+		if *retryCount < maxRetries {
+			*retryCount++
+			*lastFailureTime = now
+			*nextRunTime = now.Add(time.Duration(period) * time.Second)
+			time.AfterFunc(time.Until(*nextRunTime), func() {
+				runHugo(lastUpdateTime, nextRunTime, retryCount, lastFailureTime, period, maxRetries, debug)
+			})
+			if debug {
+				log.Printf("Retry scheduled at: %s, retry_count: %d", *nextRunTime, *retryCount)
+			}
+		} else if debug {
+			log.Println("Max retries reached, check Hugo setup")
+		}
+	} else {
+		*lastUpdateTime = now
+		*nextRunTime = time.Time{}
+		*retryCount = 0
+		if debug {
+			log.Printf("Hugo ran successfully, last_update_time: %s", *lastUpdateTime)
+		}
+	}
+}
