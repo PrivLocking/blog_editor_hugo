@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Markdown Editor</title>
+
+    <link href="/css/prism.css" rel="stylesheet">
+    <script src="/js/marked.min.js"></script>
+    <script src="/js/prism.js"></script>
+    <!-- script> document.addEventListener('DOMContentLoaded', () => { fetch('/captcha_check?failed=/captcha_html.html', { cache: 'no-store' })
+        .then(res => { if (res.status === 302) window.location = res.headers.get('Location'); }) .catch(() => window.location = '/captcha_html.html'); });
+    </script -->
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 10px;
+        }
+        .metadata, .controls, .editor, .preview {
+            margin-bottom: 20px;
+        }
+        .metadata label, .controls label {
+            display: block;
+            margin: 10px 0 5px;
+            font-weight: bold;
+        }
+        .metadata input, .metadata textarea, .controls input, .controls textarea {
+            width: 100%;
+            padding: 5px;
+            box-sizing: border-box;
+        }
+        .editor textarea, .preview {
+            width: 100%;
+            height: 300px;
+            padding: 10px;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+        }
+        .preview {
+            border: 1px solid #ddd;
+            overflow-y: auto;
+        }
+        #imageUpload, #featuredImageUpload {
+            display: none;
+        }
+        #postSelect, #langSelect, #pageSelect {
+            width: 90%;
+            margin: 10px;
+            padding: 5px;
+            font-size: 16px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px 10px;
+            font-size: 16px;
+            cursor: pointer;
+            width: 150px;
+        }
+        .inline { display: inline; margin-right: 5px; }
+        @media (min-width: 550px) {
+            .editor textarea, .preview {
+                width: 48%;
+                float: left;
+                margin-right: 4%;
+            }
+            .preview {
+                margin-right: 0;
+            }
+        }
+        @media (max-width: 549px) {
+            .container {
+                display: flex;
+                flex-direction: column;
+            }
+            .metadata {
+                order: 1;
+            }
+            .editor-preview-container {
+                order: 2;
+                display: flex;
+                flex-direction: column;
+            }
+            .preview {
+                order: 1;
+                width: 100%;
+            }
+            .editor {
+                order: 2;
+                width: 100%;
+            }
+            .controls {
+                order: 3;
+            }
+            #postSelect, #langSelect, #pageSelect, button {
+                width: 90%;
+                margin: 5px auto;
+                display: block;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="metadata">
+            <label>Title (required):</label>
+            <input id="title" type="text" required>
+            
+            <div style="display: flex; align-items: center; margin: 10px 0; width: 100%;">
+                <label for="date" style="font-weight: bold; margin-right: 5px; width: auto;">Date:</label>
+                <div style="flex-grow: 1;">
+                    <input id="date" type="datetime-local" step="1" style="width: 100%;">
+                </div>
+            </div>
+            
+            <div style="display: flex; align-items: center; margin: 10px 0; width: 100%;">
+                <div style="display: flex; align-items: center;">
+                    <label for="draft" style="font-weight: bold; margin-right: 5px;">Draft:</label>
+                    <input id="draft" type="checkbox" style="margin-right: 5px;">
+                    <span id="draftValue">False</span>
+                </div>
+                <div style="flex-grow: 1;"></div>
+            </div>
+            
+            <label>Tags (comma-separated):</label>
+            <input id="tags" type="text">
+
+        </div>
+        <div class="editor">
+            <textarea id="editor" placeholder="Write Markdown here..."></textarea>
+        </div>
+        <div class="preview" id="preview"></div>
+        <div class="controls">
+
+            <select id="postSelect"><option value="">New Post</option></select>
+            <select id="pageSelect"></select>
+            <button onclick="loadPostList(1)">Read Current Month Posts</button>
+            <button onclick="saveFile()">Save Markdown</button>
+            <input id="imageUpload" type="file" accept=".png,.jpg,.gif">
+            <button onclick="document.getElementById('imageUpload').click()">Upload Image</button>
+            <button onclick="window.open('../markdown002.html', '_blank')">Markdown Guide</button>
+            <button onclick="window.location.href='/clear_cookies.html?confirm=yes'">Clean And Exit</button>
+            <button onclick="window.location.href='/'">Goto HomePage</button>
+            <select id="langSelect"></select>
+
+            <label>Description:</label>
+            <input id="description" type="text">
+            
+            <label>Featured Image:</label>
+            <input id="featuredImageUpload" type="file" accept=".png,.jpg,.gif">
+            <button onclick="document.getElementById('featuredImageUpload').click()">Upload Featured Image</button>
+            <input id="featuredImage" type="text">
+
+        </div>
+    </div>
+    <script>
+        const editor = document.getElementById('editor');
+        const preview = document.getElementById('preview');
+        const postSelect = document.getElementById('postSelect');
+        const langSelect = document.getElementById('langSelect');
+        const pageSelect = document.getElementById('pageSelect');
+        const imageUpload = document.getElementById('imageUpload');
+        const featuredImageUpload = document.getElementById('featuredImageUpload');
+        const title = document.getElementById('title');
+        const date = document.getElementById('date');
+        const draft = document.getElementById('draft');
+        const draftValue = document.getElementById('draftValue');
+        const featuredImage = document.getElementById('featuredImage');
+        const description = document.getElementById('description');
+        const tags = document.getElementById('tags');
+        let currentPage = 1;
+        const postsPerPage = 30;
+
+        // Detect page refresh and clear editor
+        if (performance.navigation?.type === 1 || performance.getEntriesByType("navigation")[0]?.type === "reload") {
+            initEditor();
+        }
+
+        const now = new Date();
+        date.value = now.toISOString().slice(0,16);
+        draft.checked = false;
+        draftValue.innerText = 'False';
+
+        // Force line numbers on all code blocks
+        editor.addEventListener('input', () => {
+            preview.innerHTML = marked.parse(editor.value);
+            preview.querySelectorAll('pre').forEach(pre => pre.classList.add('line-numbers'));
+            Prism.highlightAll();
+        });
+
+        draft.addEventListener('change', () => {
+            draftValue.innerText = draft.checked ? 'True' : 'False';
+        });
+
+        fetch('readOption')
+            .then(response => response.json())
+            .then(data => {
+                data.lang.forEach(lang => {
+                    const option = document.createElement('option');
+                    option.value = lang;
+                    option.text = lang;
+                    langSelect.appendChild(option);
+                });
+                loadPostList(1);
+            })
+            .catch(err => alert('Error loading languages: ' + err));
+
+        langSelect.addEventListener('change', () => { initEditor(); loadPostList(1); } );
+        pageSelect.addEventListener('change', () => loadPostList(parseInt(pageSelect.value)));
+
+        function initEditor() {
+            title.value = '';
+            date.value = new Date().toISOString().slice(0,16);
+            draft.checked = false;
+            setTimeout(() => draftValue.innerText = 'False', 0);
+            featuredImage.value = '';
+            description.value = '';
+            tags.value = '';
+            editor.value = '';
+            preview.innerHTML = '';
+        }
+
+        function loadPostList(page) {
+            const lang = langSelect.value || '';
+            fetch(`list?page=${page}&perPage=${postsPerPage}&lang=${lang}`)
+                .then(response => response.json())
+                .then(data => {
+                    postSelect.innerHTML = '<option value="">New Post</option>';
+                    if (data.posts.length === 0) {
+                        pageSelect.innerHTML = '';
+                        return;
+                    }
+                    data.posts.forEach(post => {
+                        const option = document.createElement('option');
+                        option.value = post;
+                        option.text = post;
+                        postSelect.appendChild(option);
+                    });
+                    updatePagination(data.total, page);
+                })
+                .catch(err => alert('Error loading posts: ' + err));
+        }
+
+        function updatePagination(total, page) {
+            const totalPages = Math.ceil(total / postsPerPage);
+            currentPage = page;
+            pageSelect.innerHTML = '';
+            for (let i = 1; i <= totalPages; i++) {
+                const option = document.createElement('option');
+                option.value = i;
+                option.text = `Page ${i} (${(i-1)*postsPerPage+1}-${Math.min(i*postsPerPage, total)})`;
+                if (i === currentPage) option.selected = true;
+                pageSelect.appendChild(option);
+            }
+        }
+
+        postSelect.addEventListener('change', () => {
+            const selectedPost = postSelect.value;
+            const lang = langSelect.value || '';
+            if (selectedPost) {
+                fetch(`posts/${selectedPost}?lang=${lang}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        title.value = data.title;
+                        date.value = data.date.slice(0,16);
+                        draft.checked = data.draft;
+                        draftValue.innerText = data.draft ? 'True' : 'False';
+                        featuredImage.value = data.featured_image;
+                        description.value = data.description;
+                        tags.value = data.tags.join(', ');
+                        editor.value = data.content;
+                        preview.innerHTML = marked.parse(data.content);
+                        preview.querySelectorAll('pre').forEach(pre => pre.classList.add('line-numbers'));
+                        Prism.highlightAll();
+                    })
+                    .catch(err => alert('Error loading post: ' + err));
+            } else {
+                initEditor() ;
+            }
+        });
+
+        function saveFile() {
+            if (!title.value.trim()) {
+                alert('Title is required');
+                return;
+            }
+            const lang = langSelect.value || '';
+            const postData = {
+                path: postSelect.value,
+                lang: lang,
+                title: title.value,
+                date: date.value + ':00Z',
+                draft: draft.checked,
+                featured_image: featuredImage.value,
+                description: description.value,
+                tags: tags.value.split(',').map(t => t.trim()).filter(t => t),
+                content: editor.value
+            };
+            fetch('save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(postData)
+            })
+            .then(response => response.text())
+            .then(text => {
+                alert(text);
+                if (!postSelect.value) {
+                    loadPostList(currentPage);
+                    setTimeout(() => {
+                        if (postSelect.options.length > 1) {
+                            postSelect.selectedIndex = 1;
+                            postSelect.dispatchEvent(new Event('change'));
+                        }
+                    }, 100);
+                }
+            })
+            .catch(err => alert('Error: ' + err));
+        }
+
+        imageUpload.addEventListener('change', () => uploadImage(imageUpload, editor));
+        featuredImageUpload.addEventListener('change', () => uploadImage(featuredImageUpload, featuredImage));
+
+        function uploadImage(input, target) {
+            const file = input.files[0];
+            if (!file) return;
+            const formData = new FormData();
+            formData.append('image', file);
+            fetch('upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                const link = `/upload/${data.hash}`;
+                if (target === editor) {
+                    const cursorPos = editor.selectionStart || editor.value.length;
+                    editor.value = editor.value.slice(0, cursorPos) + `![${data.original}](${link})` + editor.value.slice(cursorPos);
+                    preview.innerHTML = marked.parse(editor.value);
+                    preview.querySelectorAll('pre').forEach(pre => pre.classList.add('line-numbers'));
+                    Prism.highlightAll();
+                } else {
+                    target.value = link;
+                }
+                input.value = '';
+            })
+            .catch(err => alert('Error uploading image: ' + err));
+        }
+    </script>
+</body>
+</html>

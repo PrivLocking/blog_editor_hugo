@@ -25,6 +25,9 @@ Separate the prog, to prevent being hacked.
 ## Example html: `html/blogedit.html`
 An example html for the user/client use to create/edit/submit the Markdown file.
 
+It use `prism.css` and `marked.min.js`
+
+
 ## for more details :
 Please check my [Blog](https://blog00.jjj123.com/post/2025/04/20250406_225415/).
 
