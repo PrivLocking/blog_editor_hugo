@@ -82,6 +82,8 @@ v1: src/blog_editor.go
 	vim $<
 v2: src/hugo_update_daemon.go 
 	vim $<
+v3: src/vnc_snapshot_daemon.go 
+	vim $<
 
 
 	
@@ -96,6 +98,7 @@ b $(b):
 	@echo; echo ==$@
 	rm -f bin/blog_editor.bin
 	rm -f bin/hugo_update_daemon.bin
+	rm -f bin/vnc_snapshot_daemon.bin
 	CGO_ENABLED=0  $(nice) go build -ldflags="-extldflags=-static" \
 		-o bin/blog_editor.bin \
 		src/blog_editor.go \
@@ -104,6 +107,10 @@ b $(b):
 		-o bin/hugo_update_daemon.bin \
 		src/hugo_update_daemon.go \
 		> log.goatcounter.05.make_build.go.txt
+	CGO_ENABLED=0  $(nice) go build -ldflags="-extldflags=-static" \
+		-o bin/vnc_snapshot_daemon.bin \
+		src/vnc_snapshot_daemon.go \
+		> log.goatcounter.06.make_build.go.txt
 	@ls -l -d --color bin/*.bin 
 	@echo
 
